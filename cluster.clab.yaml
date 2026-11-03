@@ -1,0 +1,110 @@
+name: multi-cluster-base
+topology:
+  nodes:
+    global-router0:
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - global-router/router0.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.72.0.1/30 dev net0 # east-edge0
+      - ip addr add 10.72.1.1/30 dev net1 # east-core0
+      - sysctl -w net.ipv4.ip_forward=1
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    east-edge0-router0:
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-edge0/router0.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.0.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip link set net2 master br0
+      - ip addr add 10.72.0.2/30 dev net0
+      - ip route replace default via 10.72.0.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    east-edge0:
+      kind: k8s-kind
+      image: kindest/node:v1.36.4
+      startup-config: east-edge0/kind.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 0s
+    east-edge0-control-plane:
+      kind: ext-container
+    east-edge0-control-plane-bird:
+      network-mode: container:east-edge0-control-plane
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-edge0/control-plane.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.69.0.2/24 dev node0
+      - ip route replace default via 10.69.0.1 dev node0
+    east-edge0-worker:
+      kind: ext-container
+    east-edge0-worker-bird:
+      network-mode: container:east-edge0-worker
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-edge0/worker.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.69.0.3/24 dev node0
+      - ip route replace default via 10.69.0.1 dev node0
+
+    east-core0-router0:
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-core0/router0.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.0.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip link set net2 master br0
+      - ip addr add 10.72.1.2/30 dev net0
+      - ip route replace default via 10.72.1.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    east-core0:
+      kind: k8s-kind
+      image: kindest/node:v1.36.4
+      startup-config: east-core0/kind.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 0s
+    east-core0-control-plane:
+      kind: ext-container
+    east-core0-control-plane-bird:
+      network-mode: container:east-core0-control-plane
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-core0/control-plane.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.69.0.2/24 dev node0
+      - ip route replace default via 10.69.0.1 dev node0
+    east-core0-worker:
+      kind: ext-container
+    east-core0-worker-bird:
+      network-mode: container:east-core0-worker
+      kind: linux
+      image: bird:3.2.2.1
+      binds:
+        - east-core0/worker.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.69.0.3/24 dev node0
+      - ip route replace default via 10.69.0.1 dev node0
+  links:
+    - endpoints: ["east-edge0-router0:net1", "east-edge0-control-plane-bird:node0"]
+    - endpoints: ["east-edge0-router0:net2", "east-edge0-worker-bird:node0"]
+    - endpoints: ["global-router0:net0", "east-edge0-router0:net0"]
+
+    - endpoints: ["east-core0-router0:net1", "east-core0-control-plane-bird:node0"]
+    - endpoints: ["east-core0-router0:net2", "east-core0-worker-bird:node0"]
+    - endpoints: ["global-router0:net1", "east-core0-router0:net0"]

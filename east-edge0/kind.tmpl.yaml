@@ -1,0 +1,27 @@
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+networking:
+  disableDefaultCNI: true
+  serviceSubnet: __SERVICE_CIDR__ # Variable
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+    - |
+      kind: InitConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-ip: "10.69.0.2"
+        taints: []
+      localAPIEndpoint:
+        advertiseAddress: "10.69.0.2"
+    labels:
+      dc: east-edge0
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-ip: "10.69.0.3"
+    labels:
+      dc: east-edge0

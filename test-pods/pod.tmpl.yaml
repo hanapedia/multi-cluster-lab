@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-client-__CLUSTER__-control-plane
+  labels:
+    app: debug-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-control-plane
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-client-__CLUSTER__-worker
+  labels:
+    app: debug-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-worker
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity

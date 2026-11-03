@@ -1,0 +1,10 @@
+kubeconfig/
+coil/upstream.yaml
+coil/coil-config.yaml
+coil/worktrees/
+test-pods/pod.yaml
+east-edge0/kind.yaml
+east-core0/kind.yaml
+global-router/router0.conf
+clab-multi-cluster-base/
+.task/

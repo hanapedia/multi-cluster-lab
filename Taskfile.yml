@@ -1,0 +1,137 @@
+version: "3"
+
+includes:
+  coil:
+    taskfile: ./coil/Taskfile.yaml
+    dir: ./coil
+
+vars:
+  BIRD_VERSION: 3.2.2.1
+  BIRD_IMAGE: bird:{{.BIRD_VERSION}}
+  TOPOLOGY: cluster.clab.yaml
+  CLUSTERS: east-edge0 east-core0
+  KUBECONFIG_DIR: kubeconfig
+  DEBUG_IMAGE: ghcr.io/cybozu/ubuntu-debug:24.04
+
+  # Pod/Service CIDR variable (README: "Variables"). "unique" (default) gives
+  # each cluster its own pool; "shared" reuses the same pool everywhere.
+  # Override with: task deploy CIDR_MODE=shared
+  CIDR_MODE: '{{.CIDR_MODE | default "unique"}}'
+
+  POD_CIDRS_UNIQUE:
+    map:
+      east-edge0: 10.64.0.0/16
+      east-core0: 10.65.0.0/16
+  POD_CIDRS_SHARED:
+    map:
+      east-edge0: 10.64.0.0/16
+      east-core0: 10.64.0.0/16
+
+  SERVICE_CIDRS_UNIQUE:
+    map:
+      east-edge0: 10.68.0.0/16
+      east-core0: 10.70.0.0/16
+  SERVICE_CIDRS_SHARED:
+    map:
+      east-edge0: 10.68.0.0/16
+      east-core0: 10.68.0.0/16
+
+tasks:
+  build-bird:
+    desc: Build the bird router image used by every containerlab node
+    dir: bird
+    cmds:
+      - docker build --build-arg BIRD_VERSION={{.BIRD_VERSION}} -t {{.BIRD_IMAGE}} .
+    status:
+      - docker image inspect {{.BIRD_IMAGE}} >/dev/null 2>&1
+    sources:
+      - Dockerfile
+
+  deploy:
+    desc: Deploy the containerlab topology (builds bird first, saves kubeconfigs after)
+    deps: [build-bird]
+    cmds:
+      - task: generate-configs
+      - sudo containerlab deploy -t {{.TOPOLOGY}}
+      - task: kubeconfig
+
+  destroy:
+    desc: Tear down the containerlab topology
+    cmds:
+      - sudo containerlab destroy -t {{.TOPOLOGY}}
+      - rm -rf {{.KUBECONFIG_DIR}}
+
+  redeploy:
+    desc: Destroy and redeploy the containerlab topology (saves kubeconfigs after)
+    deps: [build-bird]
+    cmds:
+      - task: generate-configs
+      - sudo containerlab deploy -t {{.TOPOLOGY}} --reconfigure
+      - task: kubeconfig
+
+  generate-configs:
+    desc: Render kind.yaml and global-router/router0.conf for the current CIDR_MODE ({{.CIDR_MODE}})
+    cmds:
+      - for: { var: CLUSTERS }
+        cmd: >-
+          sed "s|__SERVICE_CIDR__|{{if eq .CIDR_MODE "shared"}}{{index .SERVICE_CIDRS_SHARED .ITEM}}{{else}}{{index .SERVICE_CIDRS_UNIQUE .ITEM}}{{end}}|"
+          {{.ITEM}}/kind.tmpl.yaml > {{.ITEM}}/kind.yaml
+      - cp global-router/router0.{{.CIDR_MODE}}.conf global-router/router0.conf
+
+  kubeconfig:
+    desc: Save each cluster's kubeconfig to {{.KUBECONFIG_DIR}}/<cluster-name>.yaml
+    cmds:
+      - mkdir -p {{.KUBECONFIG_DIR}}
+      - for: { var: CLUSTERS }
+        cmd: kind get kubeconfig --name {{.ITEM}} > {{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml
+
+  cni-install:
+    desc: "Install Coil CNI on every cluster (pod CIDR mode: {{.CIDR_MODE}})"
+    cmds:
+      - task: coil:generate-upstream-manifests
+      - for: { var: CLUSTERS }
+        task: coil:load-image
+        vars:
+          CLUSTER: "{{.ITEM}}"
+      - for: { var: CLUSTERS }
+        task: coil:apply
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+      - for: { var: CLUSTERS }
+        task: coil:wait
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+          POD_CIDR: "{{if eq .CIDR_MODE \"shared\"}}{{index .POD_CIDRS_SHARED .ITEM}}{{else}}{{index .POD_CIDRS_UNIQUE .ITEM}}{{end}}"
+
+  test-pods:
+    desc: Deploy a debug pod on every node of every cluster for manual connectivity checks
+    cmds:
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.DEBUG_IMAGE}}" }
+      - for: { var: CLUSTERS }
+        cmd: kind load docker-image {{.DEBUG_IMAGE}} --name {{.ITEM}}
+      - for: { var: CLUSTERS }
+        task: apply-test-pods
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          KUBECONFIG: "{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+
+  apply-test-pods:
+    internal: true
+    desc: "Apply and wait for the debug pods on one cluster. Vars: CLUSTER, KUBECONFIG"
+    cmds:
+      - sed "s|__CLUSTER__|{{.CLUSTER}}|g" test-pods/pod.tmpl.yaml > test-pods/pod.yaml
+      - kustomize build test-pods | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+      - kubectl --kubeconfig {{.KUBECONFIG}} wait pod -l app=debug-client -n default --for=condition=Ready --timeout=120s
+
+  docker-pull:
+    desc: Pull a specified image if it doesn't exist locally
+    vars:
+      IMAGE_NAME: '{{.IMAGE_NAME | default "ghcr.io/cybozu/ubuntu:24.04"}}'
+    cmds:
+      - |
+        if ! docker image inspect {{.IMAGE_NAME}} &> /dev/null; then
+          docker pull --platform=linux/amd64 {{.IMAGE_NAME}}
+        else
+          echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
+        fi
