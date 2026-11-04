@@ -27,6 +27,10 @@ This project contains containerlab configurations for experimenting with differe
 Each cluster has 2 nodes (for now, may extend later)
 Nodes have IPs from the same subnet but not reachable across clusters
 
+### DNS
+- Global DNS server at global router
+- external-dns in each cluster writes to this DNS server to add records for their LoadBalancer IPs
+
 ## Variables
 - Pod & Service CIDR overwrap
     - all clusters use the same CIDR (allow duplicate IPs across clusters)
