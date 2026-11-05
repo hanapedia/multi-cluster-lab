@@ -1,0 +1,39 @@
+# Coil egress NAT for cross-cluster traffic, adapted from
+# mooring e2e_v2/network/coil/{address-pool,egress}.yaml.
+#
+# Client pods opt in with the annotation
+#   egress.coil.cybozu.com/egress: nat
+# and their traffic to spec.destinations is tunneled (FOU) to the egress pods,
+# which SNAT it to their own IP from the egress-nat pool.
+#
+# Rendered per cluster by coil/Taskfile.yaml (task egress):
+#   __EGRESS_CIDR__   unique, cross-cluster routable pool for egress pod IPs
+#   spec.destinations the other clusters' LB-IPAM ranges
+apiVersion: coil.cybozu.com/v2
+kind: AddressPool
+metadata:
+  name: egress-nat
+spec:
+  blockSizeBits: 0 # one /32 per egress pod
+  subnets:
+  - ipv4: __EGRESS_CIDR__
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: egress
+  annotations:
+    coil.cybozu.com/pool: egress-nat
+---
+apiVersion: coil.cybozu.com/v2
+kind: Egress
+metadata:
+  name: nat
+  namespace: egress
+spec:
+  replicas: 2
+  destinations: [] # filled in per cluster
+  template:
+    spec:
+      containers:
+      - name: egress

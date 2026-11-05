@@ -40,6 +40,17 @@ tasks:
       - kubectl --kubeconfig {{.KUBECONFIG}} wait -n kube-system --for=condition=ready --timeout=300s pod --selector=app.kubernetes.io/name=coil
       - sed "s|__POD_CIDR__|{{.POD_CIDR}}|" address-pool.tmpl.yaml | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
 
+  egress:
+    desc: "Apply the egress NAT pool and Egress to one cluster. Vars: KUBECONFIG, EGRESS_CIDR, EGRESS_DESTINATIONS (comma-separated)"
+    cmds:
+      - >-
+        sed "s|__EGRESS_CIDR__|{{.EGRESS_CIDR}}|" egress.tmpl.yaml
+        | yq '(select(.kind == "Egress") | .spec.destinations) = ("{{.EGRESS_DESTINATIONS}}" | split(",") | map(select(. != "")))'
+        | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+      # The Deployment is created asynchronously by coil-egress-controller.
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n egress wait --for=create deployment/nat --timeout=120s
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n egress rollout status deployment/nat --timeout=300s
+
   generate-upstream-manifests:
     desc: Generate Coil upstream manifests (and fresh webhook certs) from source once
     status:

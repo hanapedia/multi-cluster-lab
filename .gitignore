@@ -8,3 +8,5 @@ east-core0/kind.yaml
 global-router/router0.conf
 clab-multi-cluster-base/
 .task/
+cilium/chart/
+cilium/upstream-*.yaml

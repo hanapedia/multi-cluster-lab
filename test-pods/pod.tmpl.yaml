@@ -4,6 +4,10 @@ metadata:
   name: debug-client-__CLUSTER__-control-plane
   labels:
     app: debug-client
+  annotations:
+    # Route traffic to the other clusters' LB ranges through Coil egress NAT
+    # (coil/egress.tmpl.yaml). Only takes effect at pod creation.
+    egress.coil.cybozu.com/egress: nat
 spec:
   nodeSelector:
     kubernetes.io/hostname: __CLUSTER__-control-plane
@@ -24,6 +28,10 @@ metadata:
   name: debug-client-__CLUSTER__-worker
   labels:
     app: debug-client
+  annotations:
+    # Route traffic to the other clusters' LB ranges through Coil egress NAT
+    # (coil/egress.tmpl.yaml). Only takes effect at pod creation.
+    egress.coil.cybozu.com/egress: nat
 spec:
   nodeSelector:
     kubernetes.io/hostname: __CLUSTER__-worker
@@ -37,3 +45,41 @@ spec:
     command:
     - sleep
     - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testhttpd-__CLUSTER__-control-plane
+  labels:
+    app: testhttpd
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-control-plane
+  containers:
+  - name: testhttpd
+    # Logs remote_ipaddr per request: that's what the cross-cluster tests check.
+    image: ghcr.io/cybozu/testhttpd:0
+    imagePullPolicy: IfNotPresent
+    ports:
+    - {name: http, containerPort: 8000}
+    readinessProbe:
+      httpGet: {path: /, port: http}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testhttpd-__CLUSTER__-worker
+  labels:
+    app: testhttpd
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-worker
+  containers:
+  - name: testhttpd
+    # Logs remote_ipaddr per request: that's what the cross-cluster tests check.
+    image: ghcr.io/cybozu/testhttpd:0
+    imagePullPolicy: IfNotPresent
+    ports:
+    - {name: http, containerPort: 8000}
+    readinessProbe:
+      httpGet: {path: /, port: http}

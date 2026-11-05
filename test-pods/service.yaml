@@ -1,0 +1,14 @@
+# Exposes the testhttpd pods through Cilium LB-IPAM + BGP so the other
+# clusters can reach them. externalTrafficPolicy: Cluster on purpose: with DSR
+# the client IP is still preserved when the LB node forwards to another node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: testhttpd
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app: testhttpd
+  ports:
+  - {name: http, port: 80, targetPort: http}

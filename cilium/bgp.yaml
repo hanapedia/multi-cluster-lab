@@ -1,0 +1,49 @@
+# Every node runs a BGP speaker that peers with the bird container sharing
+# its network namespace (127.0.0.1). bird tags these routes with community
+# (64698,64699) and re-advertises them to the dc router (next hop self).
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  bgpInstances:
+  - name: cilium-lb-bgp
+    localASN: 64698
+    peers:
+    - name: bird-on-node
+      peerASN: 64699
+      peerAddress: 127.0.0.1
+      peerConfigRef:
+        name: cilium-lb-bgp-peer-config
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: cilium-lb-bgp-peer-config
+spec:
+  timers:
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  families:
+  - afi: ipv4
+    safi: unicast
+    advertisements:
+      matchLabels:
+        advertise: cilium-lb-bgp
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: lb-default
+  labels:
+    advertise: cilium-lb-bgp
+spec:
+  advertisements:
+  - advertisementType: Service
+    service:
+      addresses:
+      - LoadBalancerIP
+    # An empty selector matches no Service; this matches all of them.
+    selector:
+      matchExpressions:
+      - {key: lab.hanapedia.io/no-advertise, operator: NotIn, values: ["true"]}

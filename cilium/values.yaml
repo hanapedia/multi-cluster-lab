@@ -1,0 +1,74 @@
+# Cilium chained after Coil (generic-veth), providing policy + L4LB (DSR).
+# Adapted from the neco setup (tmp/cilium/values.yaml); neco-specific
+# tuning, label sets and debug knobs removed.
+#
+# Per-cluster values (cluster.name, cluster.id, k8sServiceHost) and image
+# settings are passed with --set from cilium/Taskfile.yaml.
+
+# --- CNI: Coil owns IPAM/routing, Cilium is chained for policy/LB ---
+cni:
+  chainingMode: generic-veth
+  customConf: true # Coil writes the conflist (see coil/coil-config.tmpl.yaml)
+routingMode: native
+enableIPv4Masquerade: false # Coil (or its egress) does NAT
+bpf:
+  hostLegacyRouting: true # let the kernel/Coil routes forward pod traffic
+  datapathMode: veth
+enableIdentityMark: false
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# Only attach to the containerlab-facing node interface, not kind's eth0.
+devices: "node+"
+
+# --- Service LB ---
+kubeProxyReplacement: true
+socketLB:
+  enabled: true
+  hostNamespaceOnly: true # pod traffic goes through tc so policy sees it
+nodePort:
+  enabled: true
+  directRoutingDevice: "node+"
+loadBalancer:
+  mode: dsr # preserve client source IP to the backend (docs/network-policy.md)
+  dsrDispatch: geneve
+  algorithm: maglev
+  acceleration: disabled
+tunnelProtocol: geneve # only used as the DSR dispatch encapsulation
+
+# LB IPs are allocated by LB-IPAM and advertised via BGP to the node-local
+# bird (127.0.0.1, see protocol "cilium" in <cluster>/{control-plane,worker}.conf).
+bgpControlPlane:
+  enabled: true
+
+# --- Identity / policy ---
+policyEnforcementMode: default
+# Identity-relevant labels. io.cilium.k8s.policy covers the cluster name
+# and serviceaccount labels.
+labels: >-
+  k8s:app
+  k8s:k8s-app
+  k8s:app\.kubernetes\.io
+  k8s:io\.kubernetes\.pod\.namespace
+  k8s:io\.cilium\.k8s\.namespace\.labels
+  io\.cilium\.k8s\.policy
+
+# --- Trimmed components ---
+l7Proxy: false
+envoy:
+  enabled: false
+hostPort:
+  enabled: false
+hubble:
+  enabled: true # `kubectl exec ds/cilium -- hubble observe` for policy debugging
+  relay:
+    enabled: false
+  ui:
+    enabled: false
+  tls:
+    auto:
+      method: helm
+operator:
+  replicas: 1

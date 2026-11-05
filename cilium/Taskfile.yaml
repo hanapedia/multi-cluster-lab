@@ -1,0 +1,94 @@
+# Cilium install (chained after Coil), adapted from tmp/NetworkTasks.yaml.
+#
+# Uses the upstream chart and images. The chart is pulled once; manifests are
+# rendered per cluster because cluster.name/cluster.id differ. Per-cluster
+# vars (CLUSTER, CLUSTER_ID, KUBECONFIG, LB_CIDR) come from the root Taskfile.
+version: '3'
+
+vars:
+  CILIUM_VERSION: '{{.CILIUM_VERSION | default "1.18.16"}}'
+  CILIUM_CHART_REPO: https://helm.cilium.io
+  CILIUM_CHART_DIR: 'chart/{{.CILIUM_VERSION}}'
+  CILIUM_IMAGE: '{{.CILIUM_IMAGE | default "quay.io/cilium/cilium"}}'
+  CILIUM_OPERATOR_IMAGE: '{{.CILIUM_OPERATOR_IMAGE | default "quay.io/cilium/operator"}}' # chart appends -generic
+  K8S_VERSION: '{{.K8S_VERSION | default "1.36.4"}}'
+
+tasks:
+  pull-chart:
+    desc: Download the Cilium Helm chart (once per version)
+    cmds:
+      - mkdir -p {{.CILIUM_CHART_DIR}}
+      - helm pull cilium --repo {{.CILIUM_CHART_REPO}} --version {{.CILIUM_VERSION}} --untar --untardir {{.CILIUM_CHART_DIR}}
+    status:
+      - test -f {{.CILIUM_CHART_DIR}}/cilium/Chart.yaml
+
+  load-image:
+    desc: "Pull and load the Cilium images into one kind cluster. Vars: CLUSTER"
+    cmds:
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.CILIUM_IMAGE}}:v{{.CILIUM_VERSION}}" }
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.CILIUM_OPERATOR_IMAGE}}-generic:v{{.CILIUM_VERSION}}" }
+      # Nodes route via the lab routers and can't reach registries, so preload.
+      - kind load docker-image {{.CILIUM_IMAGE}}:v{{.CILIUM_VERSION}} --name {{.CLUSTER}}
+      - kind load docker-image {{.CILIUM_OPERATOR_IMAGE}}-generic:v{{.CILIUM_VERSION}} --name {{.CLUSTER}}
+
+  generate-manifests:
+    desc: "Render Cilium manifests for one cluster. Vars: CLUSTER, CLUSTER_ID"
+    deps: [pull-chart]
+    cmds:
+      - >-
+        helm template cilium {{.CILIUM_CHART_DIR}}/cilium
+        --namespace kube-system
+        --kube-version {{.K8S_VERSION}}
+        --values values.yaml
+        --set cluster.name={{.CLUSTER}}
+        --set cluster.id={{.CLUSTER_ID}}
+        --set k8sServiceHost={{.CLUSTER}}-control-plane
+        --set k8sServicePort=6443
+        --set image.repository={{.CILIUM_IMAGE}}
+        --set image.tag=v{{.CILIUM_VERSION}}
+        --set image.useDigest=false
+        --set image.pullPolicy=IfNotPresent
+        --set operator.image.repository={{.CILIUM_OPERATOR_IMAGE}}
+        --set operator.image.tag=v{{.CILIUM_VERSION}}
+        --set operator.image.useDigest=false
+        --set operator.image.pullPolicy=IfNotPresent
+        > upstream-{{.CLUSTER}}.yaml
+
+  apply:
+    desc: "Apply the rendered Cilium manifests to one cluster. Vars: CLUSTER, KUBECONFIG"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} apply -f upstream-{{.CLUSTER}}.yaml
+
+  wait:
+    desc: "Wait for Cilium and apply LB-IPAM/BGP config on one cluster. Vars: KUBECONFIG, LB_CIDR"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n kube-system rollout status deployment/cilium-operator --timeout=300s
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n kube-system rollout status daemonset/cilium --timeout=300s
+      # CRDs are registered by the operator at startup.
+      - >-
+        kubectl --kubeconfig {{.KUBECONFIG}} wait --for=condition=established --timeout=120s
+        crd/ciliumloadbalancerippools.cilium.io
+        crd/ciliumbgpclusterconfigs.cilium.io
+        crd/ciliumbgppeerconfigs.cilium.io
+        crd/ciliumbgpadvertisements.cilium.io
+      - kubectl --kubeconfig {{.KUBECONFIG}} apply -f bgp.yaml
+      - sed "s|__LB_CIDR__|{{.LB_CIDR}}|" lb-ipam.tmpl.yaml | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+
+  clean:
+    desc: Remove the downloaded chart and rendered manifests
+    cmds:
+      - rm -rf chart upstream-*.yaml
+
+  docker-pull:
+    desc: Pull a specified image if it doesn't exist locally
+    vars:
+      IMAGE_NAME: '{{.IMAGE_NAME | default "ghcr.io/cybozu/ubuntu:24.04"}}'
+    cmds:
+      - |
+        if ! docker image inspect {{.IMAGE_NAME}} &> /dev/null; then
+          docker pull --platform=linux/amd64 {{.IMAGE_NAME}}
+        else
+          echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
+        fi

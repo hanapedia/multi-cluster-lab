@@ -1,0 +1,9 @@
+# Per-cluster LB-IPAM pool. __LB_CIDR__ must be unique across clusters and
+# routable through the global router (rendered by cilium/Taskfile.yaml).
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: default
+spec:
+  blocks:
+  - cidr: __LB_CIDR__

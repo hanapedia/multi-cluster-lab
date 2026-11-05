@@ -3,6 +3,9 @@ kind: Kustomization
 namespace: default
 resources:
   - pod.yaml
+  - service.yaml
 images:
   - name: ghcr.io/cybozu/ubuntu-debug
     newTag: "24.04"
+  - name: ghcr.io/cybozu/testhttpd
+    newTag: "0"

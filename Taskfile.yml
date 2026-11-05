@@ -4,6 +4,9 @@ includes:
   coil:
     taskfile: ./coil/Taskfile.yaml
     dir: ./coil
+  cilium:
+    taskfile: ./cilium/Taskfile.yaml
+    dir: ./cilium
 
 vars:
   BIRD_VERSION: 3.2.2.1
@@ -12,6 +15,7 @@ vars:
   CLUSTERS: east-edge0 east-core0
   KUBECONFIG_DIR: kubeconfig
   DEBUG_IMAGE: ghcr.io/cybozu/ubuntu-debug:24.04
+  TESTHTTPD_IMAGE: ghcr.io/cybozu/testhttpd:0
 
   # Pod/Service CIDR variable (README: "Variables"). "unique" (default) gives
   # each cluster its own pool; "shared" reuses the same pool everywhere.
@@ -35,6 +39,27 @@ vars:
     map:
       east-edge0: 10.68.0.0/16
       east-core0: 10.68.0.0/16
+
+  # Cilium cluster.id (1-255), unique per cluster.
+  CLUSTER_IDS:
+    map:
+      east-edge0: 1
+      east-core0: 2
+
+  # LB-IPAM pools. Must be unique and routable across clusters regardless
+  # of CIDR_MODE, since they are the cross-cluster entry points.
+  LB_CIDRS:
+    map:
+      east-edge0: 10.73.0.0/24
+      east-core0: 10.73.1.0/24
+
+  # Coil egress NAT pools (egress pod IPs). Must be unique and routable
+  # across clusters regardless of CIDR_MODE: they are the source IPs remote
+  # clusters see, i.e. what docs/network-policy.md maps to identities.
+  EGRESS_CIDRS:
+    map:
+      east-edge0: 10.74.0.0/24
+      east-core0: 10.74.1.0/24
 
 tasks:
   build-bird:
@@ -86,7 +111,7 @@ tasks:
         cmd: kind get kubeconfig --name {{.ITEM}} > {{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml
 
   cni-install:
-    desc: "Install Coil CNI on every cluster (pod CIDR mode: {{.CIDR_MODE}})"
+    desc: "Install Coil + chained Cilium on every cluster (pod CIDR mode: {{.CIDR_MODE}})"
     cmds:
       - task: coil:generate-upstream-manifests
       - for: { var: CLUSTERS }
@@ -102,14 +127,53 @@ tasks:
         vars:
           KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
           POD_CIDR: "{{if eq .CIDR_MODE \"shared\"}}{{index .POD_CIDRS_SHARED .ITEM}}{{else}}{{index .POD_CIDRS_UNIQUE .ITEM}}{{end}}"
+      # Coil's CNI chain calls cilium-cni, so pods stay ContainerCreating
+      # until Cilium is up.
+      - task: cilium-install
+      - task: egress-install
+
+  egress-install:
+    desc: Install Coil egress NAT toward the other clusters' LB ranges on every cluster
+    cmds:
+      - for: { var: CLUSTERS }
+        task: coil:egress
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+          EGRESS_CIDR: "{{index .EGRESS_CIDRS .ITEM}}"
+          EGRESS_DESTINATIONS: '{{$self := .ITEM}}{{range $c, $cidr := .LB_CIDRS}}{{if ne $c $self}}{{$cidr}},{{end}}{{end}}'
+
+  cilium-install:
+    desc: Install Cilium (chained after Coil, DSR L4LB, LB-IPAM + BGP) on every cluster
+    cmds:
+      - for: { var: CLUSTERS }
+        task: cilium:load-image
+        vars:
+          CLUSTER: "{{.ITEM}}"
+      - for: { var: CLUSTERS }
+        task: cilium:generate-manifests
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          CLUSTER_ID: "{{index .CLUSTER_IDS .ITEM}}"
+      - for: { var: CLUSTERS }
+        task: cilium:apply
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+      - for: { var: CLUSTERS }
+        task: cilium:wait
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+          LB_CIDR: "{{index .LB_CIDRS .ITEM}}"
 
   test-pods:
-    desc: Deploy a debug pod on every node of every cluster for manual connectivity checks
+    desc: Deploy an egress-NATed debug client and a testhttpd server (behind a LoadBalancer Service) on every node
     cmds:
       - task: docker-pull
         vars: { IMAGE_NAME: "{{.DEBUG_IMAGE}}" }
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.TESTHTTPD_IMAGE}}" }
       - for: { var: CLUSTERS }
-        cmd: kind load docker-image {{.DEBUG_IMAGE}} --name {{.ITEM}}
+        cmd: kind load docker-image {{.DEBUG_IMAGE}} {{.TESTHTTPD_IMAGE}} --name {{.ITEM}}
       - for: { var: CLUSTERS }
         task: apply-test-pods
         vars:
@@ -121,8 +185,11 @@ tasks:
     desc: "Apply and wait for the debug pods on one cluster. Vars: CLUSTER, KUBECONFIG"
     cmds:
       - sed "s|__CLUSTER__|{{.CLUSTER}}|g" test-pods/pod.tmpl.yaml > test-pods/pod.yaml
+      # Pod specs are immutable (and the egress annotation only applies at
+      # creation), so recreate the pods instead of patching them.
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n default delete pod -l 'app in (debug-client,testhttpd)' --ignore-not-found --wait
       - kustomize build test-pods | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
-      - kubectl --kubeconfig {{.KUBECONFIG}} wait pod -l app=debug-client -n default --for=condition=Ready --timeout=120s
+      - kubectl --kubeconfig {{.KUBECONFIG}} wait pod -l 'app in (debug-client,testhttpd)' -n default --for=condition=Ready --timeout=120s
 
   docker-pull:
     desc: Pull a specified image if it doesn't exist locally
