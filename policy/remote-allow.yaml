@@ -1,0 +1,28 @@
+# Cross-cluster explicit allows (applied to every cluster), written against
+# CiliumCIDRGroup labels instead of IPs. The CCGs (policy/ccg.tmpl.yaml) carry
+# the security labels of the remote workload they stand for, which is what
+# the mirroring controller in docs/network-policy.md would maintain.
+#
+# Ingress: testhttpd accepts debug-client (Coil egress) and mooring-client
+# (mooring NAT) from any remote cluster. The remote client's traffic arrives
+# with its cluster's NAT IP as source (DSR keeps it), which the CCG maps
+# back to the client's labels.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: testhttpd-from-remote-debug-client
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      app: testhttpd
+  ingress:
+  - fromCIDRSet:
+    - cidrGroupSelector:
+        matchLabels:
+          io.kubernetes.pod.namespace: default
+        matchExpressions:
+        - {key: app, operator: In, values: [debug-client, mooring-client]}
+    toPorts:
+    - ports:
+      - {port: "8000", protocol: TCP} # backend port: DSR translates at the LB node

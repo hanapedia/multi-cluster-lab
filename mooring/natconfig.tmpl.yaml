@@ -1,0 +1,24 @@
+# mooring egress NAT for cross-cluster traffic, adapted from
+# mooring e2e_v2/network/mooring/natconfig.yaml.
+#
+# Unlike Coil egress there is no NAT pod: the client pod's own node SNATs on
+# its uplink (node0), so Cilium sees the real destination on the client pod
+# itself and egress policy goes on the client (policy/remote-allow.yaml).
+#
+# Rendered per cluster by mooring/Taskfile.yaml (task wait):
+#   __MOORING_CIDR__  unique, cross-cluster routable external IPs (advertised
+#                     via BGP from every node)
+#   spec.targetCIDRs  the other clusters' LB-IPAM ranges
+apiVersion: hanapedia.link/v1alpha1
+kind: NATConfig
+metadata:
+  name: cross-cluster
+spec:
+  externalIPPool:
+  - __MOORING_CIDR__
+  portRangeSize: 100
+  targetCIDRs: [] # filled in per cluster
+  podSelector:
+    matchLabels:
+      app: mooring-client
+  # no nodeSelector: every node advertises the pool (return path via ECMP)

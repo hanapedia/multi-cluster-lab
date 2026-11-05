@@ -1,0 +1,22 @@
+# Applied only when EGRESS_NAT=mooring (see policy-install in Taskfile.yml).
+# Egress (mooring): enforced on the client pod itself. mooring SNATs on the
+# node uplink after the packet has left the pod, so the client's endpoint
+# sees the real destination (the remote LB IP) and its own identity.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mooring-client-to-remote-testhttpd
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      app: mooring-client
+  egress:
+  - toCIDRSet:
+    - cidrGroupSelector:
+        matchLabels:
+          app: testhttpd
+          io.kubernetes.pod.namespace: default
+    toPorts:
+    - ports:
+      - {port: "80", protocol: TCP} # Service port on the remote LB IP

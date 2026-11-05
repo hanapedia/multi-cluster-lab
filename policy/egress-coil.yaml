@@ -1,0 +1,24 @@
+# Applied only when EGRESS_NAT=coil (see policy-install in Taskfile.yml).
+# Egress (Coil): enforced on the Coil egress pods, not on debug-client. The client
+# only sends FOU-encapsulated traffic to the egress pod (in-cluster), so the
+# remote LB IP is first visible as a destination on the egress pod.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: egress-nat-to-remote-testhttpd
+  namespace: egress
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: coil
+      app.kubernetes.io/component: egress
+      app.kubernetes.io/instance: nat
+  egress:
+  - toCIDRSet:
+    - cidrGroupSelector:
+        matchLabels:
+          app: testhttpd
+          io.kubernetes.pod.namespace: default
+    toPorts:
+    - ports:
+      - {port: "80", protocol: TCP} # Service port on the remote LB IP

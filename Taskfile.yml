@@ -7,6 +7,9 @@ includes:
   cilium:
     taskfile: ./cilium/Taskfile.yaml
     dir: ./cilium
+  mooring:
+    taskfile: ./mooring/Taskfile.yaml
+    dir: ./mooring
 
 vars:
   BIRD_VERSION: 3.2.2.1
@@ -60,6 +63,17 @@ vars:
     map:
       east-edge0: 10.74.0.0/24
       east-core0: 10.74.1.0/24
+
+  # Egress NAT used for cross-cluster traffic: "coil" (default) or "mooring".
+  # They are mutually exclusive for now (see coil/Taskfile.yaml, task egress).
+  # Switch with: task egress-nat-uninstall && task egress-nat-install EGRESS_NAT=mooring && task test-pods EGRESS_NAT=mooring
+  EGRESS_NAT: '{{.EGRESS_NAT | default "coil"}}'
+
+  # mooring NAT external IP pools. Same requirements as EGRESS_CIDRS.
+  MOORING_CIDRS:
+    map:
+      east-edge0: 10.75.0.0/30
+      east-core0: 10.75.1.0/30
 
 tasks:
   build-bird:
@@ -130,7 +144,41 @@ tasks:
       # Coil's CNI chain calls cilium-cni, so pods stay ContainerCreating
       # until Cilium is up.
       - task: cilium-install
+      - task: egress-nat-install
+
+  egress-nat-install:
+    desc: "Install the selected egress NAT (EGRESS_NAT={{.EGRESS_NAT}}) on every cluster"
+    preconditions:
+      - sh: 'case "{{.EGRESS_NAT}}" in coil|mooring) ;; *) exit 1;; esac'
+        msg: 'EGRESS_NAT must be "coil" or "mooring", got "{{.EGRESS_NAT}}"'
+    cmds:
       - task: egress-install
+        if: '[ "{{.EGRESS_NAT}}" = coil ]'
+      - task: mooring-install
+        if: '[ "{{.EGRESS_NAT}}" = mooring ]'
+
+  egress-nat-uninstall:
+    desc: Remove both Coil egress and mooring from every cluster (whichever is installed)
+    cmds:
+      - task: egress-uninstall
+      - task: mooring-uninstall
+
+  egress-uninstall:
+    desc: Remove Coil egress NAT from every cluster
+    cmds:
+      - for: { var: CLUSTERS }
+        task: coil:egress-uninstall
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+
+  mooring-uninstall:
+    desc: Remove mooring (and its pinned BPF programs) from every cluster
+    cmds:
+      - for: { var: CLUSTERS }
+        task: mooring:uninstall
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
 
   egress-install:
     desc: Install Coil egress NAT toward the other clusters' LB ranges on every cluster
@@ -138,6 +186,7 @@ tasks:
       - for: { var: CLUSTERS }
         task: coil:egress
         vars:
+          CLUSTER: "{{.ITEM}}"
           KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
           EGRESS_CIDR: "{{index .EGRESS_CIDRS .ITEM}}"
           EGRESS_DESTINATIONS: '{{$self := .ITEM}}{{range $c, $cidr := .LB_CIDRS}}{{if ne $c $self}}{{$cidr}},{{end}}{{end}}'
@@ -165,8 +214,69 @@ tasks:
           KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
           LB_CIDR: "{{index .LB_CIDRS .ITEM}}"
 
+  mooring-install:
+    desc: Build and install mooring egress NAT (NATConfig toward the other clusters' LB ranges) on every cluster
+    cmds:
+      - task: mooring:build-images
+      - for: { var: CLUSTERS }
+        task: mooring:load-image
+        vars:
+          CLUSTER: "{{.ITEM}}"
+      - for: { var: CLUSTERS }
+        task: mooring:apply
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+      - for: { var: CLUSTERS }
+        task: mooring:wait
+        vars:
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+          MOORING_CIDR: "{{index .MOORING_CIDRS .ITEM}}"
+          MOORING_TARGETS: '{{$self := .ITEM}}{{range $c, $cidr := .LB_CIDRS}}{{if ne $c $self}}{{$cidr}},{{end}}{{end}}'
+
+  policy-install:
+    desc: "Install the global baseline/default-allow policy, cross-cluster allows, and CIDR groups for remote workloads (EGRESS_NAT={{.EGRESS_NAT}}) on every cluster"
+    cmds:
+      - for: { var: CLUSTERS }
+        task: apply-policy
+        vars:
+          CLUSTER: "{{.ITEM}}"
+          KUBECONFIG: "{{.ROOT_DIR}}/{{.KUBECONFIG_DIR}}/{{.ITEM}}.yaml"
+
+  apply-policy:
+    internal: true
+    desc: "Apply policies and remote-workload CCGs to one cluster. Vars: CLUSTER, KUBECONFIG"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} apply -f policy/baseline.yaml -f policy/remote-allow.yaml
+      # Egress allow for the selected NAT only; the other's may reference a
+      # namespace that doesn't exist (Coil's "egress").
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete -f policy/egress-{{if eq .EGRESS_NAT "mooring"}}coil{{else}}mooring{{end}}.yaml --ignore-not-found
+      - kubectl --kubeconfig {{.KUBECONFIG}} apply -f policy/egress-{{.EGRESS_NAT}}.yaml
+      # Stand-in for the mirroring controller (docs/network-policy.md): one
+      # CCG per remote workload, holding the IPs it uses across clusters.
+      #   debug-client:   the remote cluster's Coil egress pool (its SNAT IPs)
+      #   mooring-client: the remote cluster's mooring external IP pool
+      #   testhttpd:      the remote testhttpd Service's LB IP
+      - |
+        set -euo pipefail
+        render() { sed -e "s|__NAME__|$1|" -e "s|__CLUSTER__|$2|" -e "s|__NAMESPACE__|$3|" -e "s|__APP__|$4|" -e "s|__CIDR__|$5|" policy/ccg.tmpl.yaml; }
+        {{- range $remote, $egress := .EGRESS_CIDRS}}{{if ne $remote $.CLUSTER}}
+        lb=$(kubectl --kubeconfig {{$.ROOT_DIR}}/{{$.KUBECONFIG_DIR}}/{{$remote}}.yaml -n default get svc testhttpd -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        test -n "$lb" || { echo "no LB IP for testhttpd in {{$remote}}" >&2; exit 1; }
+        {{- if eq $.EGRESS_NAT "mooring"}}
+        kubectl --kubeconfig {{$.KUBECONFIG}} delete ciliumcidrgroup {{$remote}}.default.debug-client --ignore-not-found
+        { render {{$remote}}.default.mooring-client {{$remote}} default mooring-client {{index $.MOORING_CIDRS $remote}}
+        {{- else}}
+        kubectl --kubeconfig {{$.KUBECONFIG}} delete ciliumcidrgroup {{$remote}}.default.mooring-client --ignore-not-found
+        { render {{$remote}}.default.debug-client {{$remote}} default debug-client {{$egress}}
+        {{- end}}
+          echo ---
+          render {{$remote}}.default.testhttpd {{$remote}} default testhttpd "$lb/32"
+        } | kubectl --kubeconfig {{$.KUBECONFIG}} apply -f -
+        {{- end}}{{end}}
+
   test-pods:
-    desc: Deploy an egress-NATed debug client and a testhttpd server (behind a LoadBalancer Service) on every node
+    desc: "Deploy debug clients for the selected egress NAT (EGRESS_NAT={{.EGRESS_NAT}}) and a testhttpd server (behind a LoadBalancer Service) on every node"
     cmds:
       - task: docker-pull
         vars: { IMAGE_NAME: "{{.DEBUG_IMAGE}}" }
@@ -184,12 +294,28 @@ tasks:
     internal: true
     desc: "Apply and wait for the debug pods on one cluster. Vars: CLUSTER, KUBECONFIG"
     cmds:
-      - sed "s|__CLUSTER__|{{.CLUSTER}}|g" test-pods/pod.tmpl.yaml > test-pods/pod.yaml
+      # Only the client pods for the selected egress NAT (EGRESS_NAT).
+      - >-
+        sed "s|__CLUSTER__|{{.CLUSTER}}|g" test-pods/pod.tmpl.yaml
+        | yq 'select(.metadata.labels.app != "{{if eq .EGRESS_NAT "mooring"}}debug-client{{else}}mooring-client{{end}}")'
+        > test-pods/pod.yaml
       # Pod specs are immutable (and the egress annotation only applies at
       # creation), so recreate the pods instead of patching them.
-      - kubectl --kubeconfig {{.KUBECONFIG}} -n default delete pod -l 'app in (debug-client,testhttpd)' --ignore-not-found --wait
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n default delete pod -l 'app in (debug-client,mooring-client,testhttpd)' --ignore-not-found --wait
+      # Workaround for a mooring bug: NATPortRange(Request)s are keyed by pod
+      # name, not UID, and survive pod deletion (TIME_WAIT grace). A pod
+      # recreated under the same name then keeps the old pod's IP and is never
+      # SNATed. Drop the stale objects before recreating the pods.
+      - |
+        if kubectl --kubeconfig {{.KUBECONFIG}} get crd natportranges.hanapedia.link >/dev/null 2>&1; then
+          for r in $(kubectl --kubeconfig {{.KUBECONFIG}} get natportranges.hanapedia.link -o name | grep '/default-mooring-client-'); do
+            kubectl --kubeconfig {{.KUBECONFIG}} patch $r --type=merge -p '{"metadata":{"finalizers":null}}' >/dev/null
+          done
+          kubectl --kubeconfig {{.KUBECONFIG}} get natportrangerequests.hanapedia.link,natportranges.hanapedia.link -o name | grep '/default-mooring-client-' \
+            | xargs -r kubectl --kubeconfig {{.KUBECONFIG}} delete --wait
+        fi
       - kustomize build test-pods | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
-      - kubectl --kubeconfig {{.KUBECONFIG}} wait pod -l 'app in (debug-client,testhttpd)' -n default --for=condition=Ready --timeout=120s
+      - kubectl --kubeconfig {{.KUBECONFIG}} wait pod -l 'app in (debug-client,mooring-client,testhttpd)' -n default --for=condition=Ready --timeout=120s
 
   docker-pull:
     desc: Pull a specified image if it doesn't exist locally

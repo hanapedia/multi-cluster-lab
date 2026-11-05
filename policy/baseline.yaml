@@ -1,0 +1,38 @@
+# Global policy baseline (applied to every cluster).
+#
+# Selecting an endpoint with any policy puts it into implicit default-deny for
+# everything not explicitly allowed. These two rules are additive:
+#
+#   baseline       every endpoint: in-cluster traffic only
+#   default-allow  every endpoint NOT opted out: everything
+#
+# So endpoints keep full connectivity by default, and only endpoints labeled
+#   policy.lab.hanapedia.io/default-allow: "false"
+# are restricted to in-cluster traffic plus explicit allow rules (e.g. the
+# cross-cluster CIDR group rules in policy/remote-allow.yaml).
+#
+# The opt-out label must be identity-relevant (see `labels` in
+# cilium/values.yaml), otherwise these selectors can't see it.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: baseline
+spec:
+  endpointSelector: {}
+  ingress:
+  - fromEntities: [cluster]
+  egress:
+  - toEntities: [cluster, kube-apiserver]
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: default-allow
+spec:
+  endpointSelector:
+    matchExpressions:
+    - {key: policy.lab.hanapedia.io/default-allow, operator: NotIn, values: ["false"]}
+  ingress:
+  - fromEntities: [all]
+  egress:
+  - toEntities: [all]

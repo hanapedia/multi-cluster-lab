@@ -34,6 +34,11 @@ spec:
   replicas: 2
   destinations: [] # filled in per cluster
   template:
+    metadata:
+      labels:
+        # Opt out of the default-allow rule (policy/baseline.yaml) so that
+        # egress to other clusters needs an explicit allow.
+        policy.lab.hanapedia.io/default-allow: "false"
     spec:
       containers:
       - name: egress

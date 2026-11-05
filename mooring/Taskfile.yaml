@@ -1,0 +1,89 @@
+# mooring egress NAT install, adapted from
+# github.com/hanapedia/mooring e2e_v2 (install-mooring task).
+#
+# Images are built from a local mooring checkout (MOORING_DIR) and loaded
+# into kind; manifests are taken from the same checkout. Per-cluster vars
+# (CLUSTER, KUBECONFIG, MOORING_CIDR, MOORING_TARGETS) come from the root
+# Taskfile.
+version: '3'
+
+vars:
+  MOORING_DIR: '{{.MOORING_DIR | default (print .ROOT_DIR "/../mooring")}}'
+  OPERATOR_IMAGE: '{{.OPERATOR_IMAGE | default "ghcr.io/hanapedia/mooring-operator"}}'
+  AGENT_IMAGE: '{{.AGENT_IMAGE | default "ghcr.io/hanapedia/mooring-agent"}}'
+  MOORING_TAG: '{{.MOORING_TAG | default "dev"}}'
+  BUSYBOX_IMAGE: busybox:1.37 # agent init container (mounts bpffs)
+
+tasks:
+  build-images:
+    desc: Build the mooring operator and agent images from MOORING_DIR
+    cmds:
+      - test -f {{.MOORING_DIR}}/images/agent/Dockerfile || { echo "mooring checkout not found at {{.MOORING_DIR}} (set MOORING_DIR)" >&2; exit 1; }
+      - docker build -t {{.OPERATOR_IMAGE}}:{{.MOORING_TAG}} -f {{.MOORING_DIR}}/images/operator/Dockerfile {{.MOORING_DIR}}
+      - docker build -t {{.AGENT_IMAGE}}:{{.MOORING_TAG}} -f {{.MOORING_DIR}}/images/agent/Dockerfile {{.MOORING_DIR}}
+
+  load-image:
+    desc: "Load the mooring images into one kind cluster. Vars: CLUSTER"
+    cmds:
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.BUSYBOX_IMAGE}}" }
+      - >-
+        kind load docker-image --name {{.CLUSTER}}
+        {{.OPERATOR_IMAGE}}:{{.MOORING_TAG}} {{.AGENT_IMAGE}}:{{.MOORING_TAG}} {{.BUSYBOX_IMAGE}}
+
+  apply:
+    desc: "Install mooring CRDs, operator and agent on one cluster. Vars: CLUSTER, KUBECONFIG"
+    preconditions:
+      # Mutually exclusive with Coil egress (see coil/Taskfile.yaml, task egress).
+      - sh: 'test -z "$(kubectl --kubeconfig {{.KUBECONFIG}} get egresses.coil.cybozu.com -A -o name 2>/dev/null)"'
+        msg: "Coil egress is installed on {{.CLUSTER}}; run `task egress-uninstall` first"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} apply -f {{.MOORING_DIR}}/manifests/crds/
+      - >-
+        yq '(select(.kind == "Deployment") .spec.template.spec.containers[] | select(.name == "operator") .image)
+        = "{{.OPERATOR_IMAGE}}:{{.MOORING_TAG}}"' {{.MOORING_DIR}}/manifests/operator.yaml
+        | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+      # Agent defaults already match the lab: uplink node0, BGP 127.0.0.2/AS64798
+      # -> node bird 127.0.0.1/AS64799 (protocol "mooring" in <cluster>/*.conf).
+      - >-
+        yq '(select(.kind == "DaemonSet") .spec.template.spec.containers[] | select(.name == "agent") .image)
+        = "{{.AGENT_IMAGE}}:{{.MOORING_TAG}}"' {{.MOORING_DIR}}/manifests/agent.yaml
+        | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+
+  wait:
+    desc: "Wait for mooring and apply its NATConfig on one cluster. Vars: KUBECONFIG, MOORING_CIDR, MOORING_TARGETS (comma-separated)"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n mooring-system rollout status deployment/mooring-operator --timeout=300s
+      - kubectl --kubeconfig {{.KUBECONFIG}} -n mooring-system rollout status daemonset/mooring-agent --timeout=300s
+      - >-
+        sed "s|__MOORING_CIDR__|{{.MOORING_CIDR}}|" natconfig.tmpl.yaml
+        | yq '.spec.targetCIDRs = ("{{.MOORING_TARGETS}}" | split(",") | map(select(. != "")))'
+        | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
+
+  uninstall:
+    desc: "Remove mooring from one cluster, including its pinned BPF programs. Vars: CLUSTER, KUBECONFIG"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete natconfigs.hanapedia.link --all --ignore-not-found 2>/dev/null || true
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete -f {{.MOORING_DIR}}/manifests/agent.yaml -f {{.MOORING_DIR}}/manifests/operator.yaml --ignore-not-found --wait
+      # The operator holds NATPortRanges for a TIME_WAIT grace period (240s);
+      # with the operator gone, drop the finalizers instead of waiting.
+      - |
+        for r in $(kubectl --kubeconfig {{.KUBECONFIG}} get natportranges.hanapedia.link -o name 2>/dev/null); do
+          kubectl --kubeconfig {{.KUBECONFIG}} patch $r --type=merge -p '{"metadata":{"finalizers":null}}'
+        done
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete -f {{.MOORING_DIR}}/manifests/crds/ --ignore-not-found --wait
+      # Deleting the agent leaves the TCX links pinned (rollout resilience).
+      # Removing the pins detaches them, same as `moorctl unload`.
+      - for n in $(kind get nodes --name {{.CLUSTER}}); do docker exec $n rm -rf /sys/fs/bpf/mooring; done
+
+  docker-pull:
+    desc: Pull a specified image if it doesn't exist locally
+    vars:
+      IMAGE_NAME: '{{.IMAGE_NAME | default "ghcr.io/cybozu/ubuntu:24.04"}}'
+    cmds:
+      - |
+        if ! docker image inspect {{.IMAGE_NAME}} &> /dev/null; then
+          docker pull --platform=linux/amd64 {{.IMAGE_NAME}}
+        else
+          echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
+        fi

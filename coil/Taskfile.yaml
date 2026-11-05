@@ -41,7 +41,15 @@ tasks:
       - sed "s|__POD_CIDR__|{{.POD_CIDR}}|" address-pool.tmpl.yaml | kubectl --kubeconfig {{.KUBECONFIG}} apply -f -
 
   egress:
-    desc: "Apply the egress NAT pool and Egress to one cluster. Vars: KUBECONFIG, EGRESS_CIDR, EGRESS_DESTINATIONS (comma-separated)"
+    desc: "Apply the egress NAT pool and Egress to one cluster. Vars: CLUSTER, KUBECONFIG, EGRESS_CIDR, EGRESS_DESTINATIONS (comma-separated)"
+    preconditions:
+      # Coil egress and mooring are mutually exclusive: mooring's snat_egress
+      # drops non-SYN TCP from non-enrolled sources to its targetCIDRs, which
+      # breaks Coil egress pods sending to the same destinations.
+      - sh: '! kubectl --kubeconfig {{.KUBECONFIG}} get namespace mooring-system >/dev/null 2>&1'
+        msg: "mooring is installed on {{.CLUSTER}}; run `task mooring-uninstall` first"
+      - sh: 'for n in $(kind get nodes --name {{.CLUSTER}}); do docker exec $n test ! -e /sys/fs/bpf/mooring || exit 1; done'
+        msg: "mooring BPF programs are still pinned on {{.CLUSTER}} nodes; run `task mooring-uninstall` first"
     cmds:
       - >-
         sed "s|__EGRESS_CIDR__|{{.EGRESS_CIDR}}|" egress.tmpl.yaml
@@ -50,6 +58,12 @@ tasks:
       # The Deployment is created asynchronously by coil-egress-controller.
       - kubectl --kubeconfig {{.KUBECONFIG}} -n egress wait --for=create deployment/nat --timeout=120s
       - kubectl --kubeconfig {{.KUBECONFIG}} -n egress rollout status deployment/nat --timeout=300s
+
+  egress-uninstall:
+    desc: "Remove the egress NAT Egress, namespace and pool from one cluster. Vars: KUBECONFIG"
+    cmds:
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete namespace egress --ignore-not-found --wait
+      - kubectl --kubeconfig {{.KUBECONFIG}} delete addresspool egress-nat --ignore-not-found --wait
 
   generate-upstream-manifests:
     desc: Generate Coil upstream manifests (and fresh webhook certs) from source once

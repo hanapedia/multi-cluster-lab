@@ -46,9 +46,12 @@ bgpControlPlane:
 # --- Identity / policy ---
 policyEnforcementMode: default
 # Identity-relevant labels. io.cilium.k8s.policy covers the cluster name
-# and serviceaccount labels.
+# and serviceaccount labels. policy.lab.hanapedia.io carries the opt-out
+# label for the default-allow rule (policy/baseline.yaml); it must be listed
+# here or endpoint selectors can't see it.
 labels: >-
   k8s:app
+  k8s:policy\.lab\.hanapedia\.io
   k8s:k8s-app
   k8s:app\.kubernetes\.io
   k8s:io\.kubernetes\.pod\.namespace
@@ -72,3 +75,5 @@ hubble:
       method: helm
 operator:
   replicas: 1
+# Restart agents when cilium-config changes (e.g. the labels list above).
+rollOutCiliumPods: true

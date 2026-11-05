@@ -1,0 +1,19 @@
+# A remote workload as seen from this cluster: the IPs it uses across
+# clusters, labeled with its security labels (plus its cluster).
+# Rendered per (local cluster, remote cluster, workload) by the policy-install
+# task. Placeholders: __NAME__ __CLUSTER__ __NAMESPACE__ __APP__ __CIDR__
+apiVersion: cilium.io/v2
+kind: CiliumCIDRGroup
+metadata:
+  name: __NAME__
+  labels:
+    # Not io.cilium.k8s.policy.cluster: Cilium strips every
+    # io.cilium.k8s.policy* key from CCG labels before building the CIDR
+    # identity (RemoveCiliumLabels, anti-spoofing), so the remote cluster
+    # needs a key of our own.
+    policy.lab.hanapedia.io/cluster: __CLUSTER__
+    io.kubernetes.pod.namespace: __NAMESPACE__
+    app: __APP__
+spec:
+  externalCIDRs:
+  - __CIDR__

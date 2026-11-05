@@ -49,9 +49,62 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
+  name: mooring-client-__CLUSTER__-control-plane
+  labels:
+    # Selected by the mooring NATConfig (mooring/natconfig.tmpl.yaml): SNAT
+    # happens on this pod's node, no NAT pod or tunnel involved.
+    app: mooring-client
+    # Opt out of the default-allow rule (policy/baseline.yaml): egress to
+    # other clusters needs an explicit allow, enforced on this pod itself.
+    policy.lab.hanapedia.io/default-allow: "false"
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-control-plane
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mooring-client-__CLUSTER__-worker
+  labels:
+    # Selected by the mooring NATConfig (mooring/natconfig.tmpl.yaml): SNAT
+    # happens on this pod's node, no NAT pod or tunnel involved.
+    app: mooring-client
+    # Opt out of the default-allow rule (policy/baseline.yaml): egress to
+    # other clusters needs an explicit allow, enforced on this pod itself.
+    policy.lab.hanapedia.io/default-allow: "false"
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: __CLUSTER__-worker
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
   name: testhttpd-__CLUSTER__-control-plane
   labels:
     app: testhttpd
+    # Opt out of the default-allow rule (policy/baseline.yaml) so that
+    # ingress from other clusters needs an explicit allow.
+    policy.lab.hanapedia.io/default-allow: "false"
 spec:
   nodeSelector:
     kubernetes.io/hostname: __CLUSTER__-control-plane
@@ -71,6 +124,9 @@ metadata:
   name: testhttpd-__CLUSTER__-worker
   labels:
     app: testhttpd
+    # Opt out of the default-allow rule (policy/baseline.yaml) so that
+    # ingress from other clusters needs an explicit allow.
+    policy.lab.hanapedia.io/default-allow: "false"
 spec:
   nodeSelector:
     kubernetes.io/hostname: __CLUSTER__-worker

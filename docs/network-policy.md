@@ -15,13 +15,19 @@
 - CiliumCIDRGroup (CCG) is created in each remote cluster for those IPs and referenced in CiliumNetworkPolicy (CNP)
     - these CCG should have labels matching the security labels of the remote CiliumIdentity
     - CNP reference CCG by those labels via `cidrGroupSelector` in `fromCIDRSet` / `toCIDRSet`
+    - CCG labels become identity labels with the `cidrgroup:` source (e.g. `cidrgroup:app=foo`), on top of `reserved:world`
+    - Cilium strips every `io.cilium.k8s.policy*` key from CCG labels before building the CIDR identity (`RemoveCiliumLabels`, anti-spoofing; verified on v1.18.16)
+        - this is silent: the CCG object keeps the label, the identity doesn't
+        - affects `io.cilium.k8s.policy.cluster`, `io.cilium.k8s.policy.serviceaccount`, etc.
+        - so mirrored remote identities must carry these under keys we own (e.g. `policy.lab.hanapedia.io/cluster`), and the mirroring controller must rewrite them
+        - policy authors must select remote peers on those keys, not on the Cilium ones
 
 ## Missing Pieces
 - A coordinating controllers in each cluster that create CCG in their own cluster with the ingress and egress IPs of CiliumIdentities in the remote cluster.
     - should not be every CiliumIdentity, only the ones opted-in. probably by a label on pods
     - full mesh between clusters to communicate about new identities that should be mirrored.
     - peering between clusters must be authenticated
-        - the cluster label (`io.cilium.k8s.policy.cluster`) on mirrored CCGs should be derived from the authenticated peer, not taken from the peer's payload
+        - the cluster label on mirrored CCGs (our own key, see Core idea) should be derived from the authenticated peer, not taken from the peer's payload
 - A controller that assigns ingress and egress IPs to each CiliumIdentity in their own cluster.
     - egress IP can be allocated via mooring (my WIP egress gateway solution. see github.com/hanapedia/mooring) 
         - or coil egress, but may not be feasible since IPs are coupled to namespaces
@@ -29,3 +35,4 @@
     - requirement: IPs released by a deleted identity must not be reallocated until all remote clusters have removed the corresponding CCG (or a cooldown has passed)
         - otherwise the new identity's traffic is attributed to the old identity's labels in remote clusters
 - must use cluster indicating security label `k8s:io.cilium.k8s.policy.cluster=<cluster-name>` by specifying `--cluster-name`
+    - this applies to local identities only; on mirrored CCGs it is stripped (see Core idea)
